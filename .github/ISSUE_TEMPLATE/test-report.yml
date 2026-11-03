@@ -19,7 +19,7 @@ body:
     id: cpu
     attributes:
       label: CPU and iGPU (with PCI ID)
-      placeholder: Ryzen 5 7535HS, Radeon 680M 1002:1681
+      placeholder: Ryzen 7 7445HS, Radeon 740M 1002:1901
     validations:
       required: true
   - type: input
@@ -40,7 +40,7 @@ body:
     id: versions
     attributes:
       label: macOS, NullMoth and PrimeBridge versions
-      placeholder: macOS 26.7.2, NullMoth 2.6.3, PrimeBridge 0.4.8
+      placeholder: macOS 26.7.2, NullMoth 2.6.6, PrimeBridge 0.4.9
     validations:
       required: true
   - type: dropdown

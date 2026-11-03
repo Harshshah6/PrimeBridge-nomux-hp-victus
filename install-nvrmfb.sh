@@ -1,11 +1,11 @@
 #!/bin/sh
-# Installs the patched NVRMFB.kext (NullMoth 2.6.3 + nvfbforce) from this folder into /Library/Extensions.
-# Keeps your original as NVRMFB-2.6.3-orig.kext next to this script. Rollback: sudo sh install-nvrmfb.sh NVRMFB-2.6.3-orig.kext
+# Installs the patched NVRMFB.kext (NullMoth 2.6.3-2.6.6 + nvfbforce) from this folder into /Library/Extensions.
+# Keeps your original as NVRMFB-orig.kext next to this script. Rollback: sudo sh install-nvrmfb.sh NVRMFB-orig.kext
 set -e
 cd "$(dirname "$0")"
 K=${1:-NVRMFB.kext}
 [ -d "$K" ] || { echo "no $K here"; exit 1; }
-[ -d NVRMFB-2.6.3-orig.kext ] || cp -R /Library/Extensions/NVRMFB.kext NVRMFB-2.6.3-orig.kext
+[ -d NVRMFB-orig.kext ] || cp -R /Library/Extensions/NVRMFB.kext NVRMFB-orig.kext
 rm -rf /Library/Extensions/NVRMFB.kext
 cp -R "$K" /Library/Extensions/NVRMFB.kext
 chown -R root:wheel /Library/Extensions/NVRMFB.kext

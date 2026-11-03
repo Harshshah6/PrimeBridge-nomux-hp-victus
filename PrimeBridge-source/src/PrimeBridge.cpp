@@ -19,16 +19,45 @@
 OSDefineMetaClassAndAbstractStructors(PrimeFrameSource, OSObject)
 OSDefineMetaClassAndStructors(PrimeBridge, IOService)
 
-// 680M (Rembrandt: GC 10.3.3, DCN 3.1.2) register byte offsets in BAR5, from Linux amdgpu:
-// yellow_carp_offset.h (GC_BASE seg0 0x1260, DCN_BASE seg2 0x34C0), gc_10_3_0_offset.h, dcn_3_1_2_offset.h.
-static constexpr uint32_t kRegFbOffset   = (0x1260 + 0x16e7) * 4;  // GCMC_VM_FB_OFFSET[23:0] << 24 = VRAM's system address
-static constexpr uint32_t kRegFbLocBase  = (0x1260 + 0x16fc) * 4;  // GCMC_VM_FB_LOCATION_BASE[23:0]
-static constexpr uint32_t kRegFbLocTop   = (0x1260 + 0x16fd) * 4;  // GCMC_VM_FB_LOCATION_TOP[23:0]
-static constexpr uint32_t kRegOtg0Ctl    = (0x34C0 + 0x1b41) * 4;  // OTG_CONTROL, bit 0 = OTG_MASTER_EN
-static constexpr uint32_t kRegOtg0HTotal = (0x34C0 + 0x1b2a) * 4;  // OTG_H_TOTAL[14:0] = h_total - 1
-static constexpr uint32_t kRegOtg0VTotal = (0x34C0 + 0x1b2f) * 4;  // OTG_V_TOTAL[14:0] = v_total - 1
-static constexpr uint32_t kRegOtg0Frames = (0x34C0 + 0x1b4c) * 4;  // OTG_STATUS_FRAME_COUNT[23:0]
-static constexpr uint32_t kOtgStride     = 0x80 * 4;               // OTG1..3 follow every 0x80 registers
+// iGPU register layouts. All fields are dword offsets into BAR5 (the MMIO
+// aperture), exactly like Linux amdgpu's SOC15_REG_OFFSET(ip, 0, reg) =
+// reg_offset[ip][0][reg_BASE_IDX] + reg; the byte offset is (base + reg) * 4.
+struct IgpuRegLayout {
+    const char *name;
+    uint32_t    gcBase;      // GC segment 0 base, in dwords
+    uint32_t    dcnBase;     // DCN/DMU segment 2 base, in dwords
+    uint32_t    fbOffset;    // GCMC_VM_FB_OFFSET
+    uint32_t    fbLocBase;   // GCMC_VM_FB_LOCATION_BASE
+    uint32_t    fbLocTop;    // GCMC_VM_FB_LOCATION_TOP
+    uint32_t    otg0Ctl;     // OTG0_OTG_CONTROL
+    uint32_t    otg0HTotal;  // OTG0_OTG_H_TOTAL
+    uint32_t    otg0VTotal;  // OTG0_OTG_V_TOTAL
+    uint32_t    otg0Frames;  // OTG0_OTG_STATUS_FRAME_COUNT
+    uint32_t    otgStride;   // dwords between OTG instances
+};
+
+// Radeon 680M (Rembrandt: GC 10.3.3, DCN 3.1.2), the layout this project shipped
+// with. yellow_carp_offset.h: GC seg0 0x1260, DCN seg2 0x34C0.
+// gc_10_3_0_offset.h: 0x16e7 / 0x16fc / 0x16fd.
+// dcn_3_1_2_offset.h: OTG0 0x1b41 / 0x1b2a / 0x1b2f / 0x1b4c, stride 0x80.
+static constexpr IgpuRegLayout kLayoutRembrandt = {
+    "680M (GC 10.3.3 / DCN 3.1.2)",
+    0x1260, 0x34C0, 0x16e7, 0x16fc, 0x16fd,
+    0x1b41, 0x1b2a, 0x1b2f, 0x1b4c, 0x80,
+};
+
+// Phoenix / Hawk Point (740M/760M/780M, GC 11.0.x, DCN 3.1.x). All GC 11.0.x
+// revisions share gc_11_0_0_offset.h: 0x15a7 / 0x1678 / 0x1679. GC 11.0.4
+// (HawkPoint2 740M) uses gfxhub_v3_0, which reads GCMC_VM_FB_OFFSET << 24 just
+// like the 680M's gfxhub_v2_1. DCN 3.1.2 and 3.1.4 have identical OTG offsets,
+// and the SOC15 segment bases are the same as Rembrandt.
+static constexpr IgpuRegLayout kLayoutPhoenix = {
+    "Phoenix/HawkPoint (GC 11.0.x / DCN 3.1.x)",
+    0x1260, 0x34C0, 0x15a7, 0x1678, 0x1679,
+    0x1b41, 0x1b2a, 0x1b2f, 0x1b4c, 0x80,
+};
+
+static constexpr uint32_t kBar5MapLen   = 0x80000;  // mapped window of BAR5
 
 extern "C" int rdmsr_carefully(uint32_t msr, uint32_t *lo, uint32_t *hi);   // com.apple.kpi.unsupported
 
@@ -224,6 +253,11 @@ bool PrimeBridge::setup(IOService *provider) {
     setProperty("PrimeBridgeVersion", PRIMEBRIDGE_VERSION);
     setProperty("PrimeMode", "boot-waiting-nvfb");
 
+    // Pick GC/DCN register offsets from the PCI device ID before any probe runs.
+    // primegcb/primedcnb override the segment bases; primefb*/primeotg* override
+    // individual register offsets, all in Linux's dword units.
+    selectRegisterLayout();
+
     symScanoutInfo_ = OSSymbol::withCStringNoCopy("nvScanoutInfo");
 
     // Optional boot-args:
@@ -416,6 +450,86 @@ bool PrimeBridge::attachNvidiaScanout() {
     return true;
 }
 
+// Pick the BAR5 register layout for this iGPU. The 680M keeps the values this
+// project shipped with; the Phoenix/Hawk Point family (GC 11.0.x) uses the GC
+// 11.0 offsets. Every value can be overridden for bring-up: the GC/DCN segment
+// bases come from the APU's IP discovery table, not from code, so they are the
+// one part that cannot be read from a public register header.
+void PrimeBridge::selectRegisterLayout() {
+    const uint16_t vendor = igpu_->configRead16(kIOPCIConfigVendorID);
+    const uint16_t device = igpu_->configRead16(kIOPCIConfigDeviceID);
+    const IgpuRegLayout &layout = (device == 0x1681) ? kLayoutRembrandt : kLayoutPhoenix;
+
+    uint32_t gcBase    = layout.gcBase;
+    uint32_t dcnBase   = layout.dcnBase;
+    uint32_t fbOffset  = layout.fbOffset;
+    uint32_t fbLocBase = layout.fbLocBase;
+    uint32_t fbLocTop  = layout.fbLocTop;
+    uint32_t otgCtl    = layout.otg0Ctl;
+    uint32_t otgHTotal = layout.otg0HTotal;
+    uint32_t otgVTotal = layout.otg0VTotal;
+    uint32_t otgFrames = layout.otg0Frames;
+    uint32_t otgStride = layout.otgStride;
+
+    PE_parse_boot_argn("primegcb",    &gcBase,    sizeof(gcBase));
+    PE_parse_boot_argn("primedcnb",   &dcnBase,   sizeof(dcnBase));
+    PE_parse_boot_argn("primefbofs",  &fbOffset,  sizeof(fbOffset));
+    PE_parse_boot_argn("primefbbase", &fbLocBase, sizeof(fbLocBase));
+    PE_parse_boot_argn("primefbtop",  &fbLocTop,  sizeof(fbLocTop));
+    PE_parse_boot_argn("primeotgctl", &otgCtl,    sizeof(otgCtl));
+    PE_parse_boot_argn("primeotgh",   &otgHTotal, sizeof(otgHTotal));
+    PE_parse_boot_argn("primeotgv",   &otgVTotal, sizeof(otgVTotal));
+    PE_parse_boot_argn("primeotgf",   &otgFrames, sizeof(otgFrames));
+    PE_parse_boot_argn("primeotgs",   &otgStride, sizeof(otgStride));
+
+    // Compute in 64 bits so a bogus boot-arg cannot wrap into a small offset.
+    auto regByte = [](uint32_t base, uint32_t reg) -> uint64_t {
+        return ((uint64_t)base + reg) * 4;
+    };
+    const uint64_t fbOffsetB  = regByte(gcBase, fbOffset);
+    const uint64_t fbLocBaseB = regByte(gcBase, fbLocBase);
+    const uint64_t fbLocTopB  = regByte(gcBase, fbLocTop);
+    const uint64_t otgCtlB    = regByte(dcnBase, otgCtl);
+    const uint64_t otgHTotalB = regByte(dcnBase, otgHTotal);
+    const uint64_t otgVTotalB = regByte(dcnBase, otgVTotal);
+    const uint64_t otgFramesB = regByte(dcnBase, otgFrames);
+    const uint64_t otgStrideB = (uint64_t)otgStride * 4;
+    const uint64_t lastOtgB   = otgFramesB + 3 * otgStrideB;
+
+    const bool inRange = fbOffsetB  + 4 <= kBar5MapLen &&
+                         fbLocBaseB + 4 <= kBar5MapLen &&
+                         fbLocTopB  + 4 <= kBar5MapLen &&
+                         otgCtlB    + 4 <= kBar5MapLen &&
+                         otgHTotalB + 4 <= kBar5MapLen &&
+                         otgVTotalB + 4 <= kBar5MapLen &&
+                         lastOtgB   + 4 <= kBar5MapLen;
+    regLayoutValid_ = inRange;
+
+    gcBase_  = gcBase;
+    dcnBase_ = dcnBase;
+    if (inRange) {
+        regFbOffset_  = (uint32_t)fbOffsetB;
+        regFbLocBase_ = (uint32_t)fbLocBaseB;
+        regFbLocTop_  = (uint32_t)fbLocTopB;
+        regOtg0Ctl_    = (uint32_t)otgCtlB;
+        regOtg0HTotal_ = (uint32_t)otgHTotalB;
+        regOtg0VTotal_ = (uint32_t)otgVTotalB;
+        regOtg0Frames_ = (uint32_t)otgFramesB;
+        otgStride_     = (uint32_t)otgStrideB;
+    }
+
+    setProperty("RegisterLayout", layout.name);
+    setProperty("GCBase", gcBase_, 32);
+    setProperty("DCNBase", dcnBase_, 32);
+    setProperty("RegFbOffset", (uint64_t)fbOffsetB, 64);
+    setProperty("RegOtg0Ctl", (uint64_t)otgCtlB, 64);
+    logf("iGPU %04x:%04x layout %s: GC base 0x%x DCN base 0x%x, FB 0x%llx/0x%llx/0x%llx, OTG 0x%llx/0x%llx/0x%llx/0x%llx stride 0x%llx -> %s",
+         vendor, device, layout.name, gcBase, dcnBase,
+         fbOffsetB, fbLocBaseB, fbLocTopB,
+         otgCtlB, otgHTotalB, otgVTotalB, otgFramesB, otgStrideB,
+         inRange ? "in BAR5" : "OUT OF BAR5 RANGE");
+}
+
 // Read-only groundwork for writing the 680M's memory directly instead of through BAR0, as Linux amdgpu
 // does on x86 APUs (gmc_v10_0.c): where that memory sits in system RAM, whether BAR0 and that address
 // show the same pixels, and the panel timing. Never writes; runs once, on a still screen.
@@ -424,9 +538,10 @@ void PrimeBridge::probeIgpu() {
     if (!mmio_ && bar5 && bar5->getLength() >= 0x80000)
         mmio_ = bar5->createMappingInTask(kernel_task, 0, kIOMapAnywhere | kIOMapInhibitCache, 0, 0x80000);
     if (!mmio_) { logf("igpu probe: BAR5 not mapped"); return; }
+    if (!regLayoutValid_) { logf("igpu probe: register layout invalid, skipping"); return; }
     regs_ = reinterpret_cast<volatile uint32_t *>(mmio_->getVirtualAddress());
 
-    const uint32_t off = regs_[kRegFbOffset / 4], base = regs_[kRegFbLocBase / 4], top = regs_[kRegFbLocTop / 4];
+    const uint32_t off = regs_[regFbOffset_ / 4], base = regs_[regFbLocBase_ / 4], top = regs_[regFbLocTop_ / 4];
     const uint64_t vramPhys = (uint64_t)(off & 0xFFFFFFu) << 24;
     const uint64_t vramSize = (top & 0xFFFFFFu) >= (base & 0xFFFFFFu)
                             ? (uint64_t)((top & 0xFFFFFFu) - (base & 0xFFFFFFu) + 1) << 24 : 0;
@@ -477,13 +592,13 @@ void PrimeBridge::probeIgpu() {
 
     // Panel timing: the OTG the GOP left running drives the panel.
     for (uint32_t i = 0; i < 4 && !otgFrameReg_; i++) {
-        if (!(regs_[(kRegOtg0Ctl + i * kOtgStride) / 4] & 1u)) continue;
-        otgFrameReg_ = kRegOtg0Frames + i * kOtgStride;
+        if (!(regs_[(regOtg0Ctl_ + i * otgStride_) / 4] & 1u)) continue;
+        otgFrameReg_ = regOtg0Frames_ + i * otgStride_;
         otgFrames_ = regs_[otgFrameReg_ / 4];
         otgAbs_ = mach_absolute_time();
         logf("igpu probe: OTG%u running, h_total %u v_total %u", i,
-             (regs_[(kRegOtg0HTotal + i * kOtgStride) / 4] & 0x7FFFu) + 1,
-             (regs_[(kRegOtg0VTotal + i * kOtgStride) / 4] & 0x7FFFu) + 1);
+             (regs_[(regOtg0HTotal_ + i * otgStride_) / 4] & 0x7FFFu) + 1,
+             (regs_[(regOtg0VTotal_ + i * otgStride_) / 4] & 0x7FFFu) + 1);
     }
     if (!otgFrameReg_) logf("igpu probe: no OTG running");
 }

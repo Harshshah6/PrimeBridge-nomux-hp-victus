@@ -4,10 +4,10 @@
 
 **NVIDIA-accelerated macOS on the internal screen of AMD laptops without a MUX switch**
 
-![version](https://img.shields.io/badge/version-0.4.8-blue)
+![version](https://img.shields.io/badge/version-0.4.9-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
-![iGPU](https://img.shields.io/badge/iGPU-Radeon%20680M-red)
-![requires](https://img.shields.io/badge/requires-NullMoth%202.6.3-black)
+![iGPU](https://img.shields.io/badge/iGPU-Radeon%20680M%2F740M-red)
+![requires](https://img.shields.io/badge/requires-NullMoth%202.6.x-black)
 
 </div>
 
@@ -26,7 +26,7 @@ flowchart LR
 
 ## Status
 
-Version 0.4.8 runs every day on one laptop:
+The upstream 0.4.8 build runs every day on one laptop:
 
 | | |
 |---|---|
@@ -39,28 +39,33 @@ Version 0.4.8 runs every day on one laptop:
 
 No other laptop has been tested yet.
 
+This fork targets a second machine: an HP Victus with a Ryzen 7 7445HS and a Radeon 740M (`1002:1901`, HawkPoint2, GC 11.0.4 / DCN 3.1.4). PrimeBridge selects the 740M's PCI ID and GC register offsets automatically, and the `nvfbforce` patch applies unchanged to NullMoth **2.6.3 through 2.6.6**: `kexts/NVRMFB/fb/nvrm-fb.cpp` and `nvrm_vram_abi.h` are byte-identical across those releases, and the VRAM ABI is still version 2.
+
 > [!WARNING]
 > PrimeBridge is a kernel extension. It writes to the iGPU's memory and changes a private pointer inside NullMoth's NVRMFB kext. It comes with no warranty. Keep an HDMI monitor at hand for your first boots, and try it from a USB stick before touching your internal install.
 
 ## Requirements
 
-- An AMD Rembrandt or Rembrandt-R APU with a Radeon 680M, PCI ID `1002:1681`. PrimeBridge matches only that ID, and its register offsets are for GC 10.3.3 / DCN 3.1.2.
-- An NVIDIA GPU supported by NullMoth, running **NullMoth 2.6.3 exactly**: NVRM, NVAccel and NVRMAGDC from NullMoth, plus the patched NVRMFB from this project's release. PrimeBridge checks NVRMFB's field offsets and refuses to redirect if they do not match.
+- An AMD APU with a Radeon 680M (`1002:1681`, Rembrandt: GC 10.3.3 / DCN 3.1.2) or a Phoenix/Hawk Point 740M/760M/780M (`1002:15BF`, `15C8`, `1900`, `1901`: GC 11.0.x / DCN 3.1.x). The layout is selected from the PCI device ID, and the boot-args below can override it during bring-up.
+- An NVIDIA GPU supported by NullMoth, running **NullMoth 2.6.3 or 2.6.6** with this project's patched NVRMFB. PrimeBridge checks NVRMFB's private field offsets at runtime and refuses to redirect if they do not match; 2.6.3 and 2.6.6 are identical here.
 - At least one HDMI connector wired to the NVIDIA GPU, with nothing plugged into it.
 - macOS already booting normally (USB ports mapped and so on). PrimeBridge does not fix boot problems.
 - A 32 bpp firmware boot framebuffer inside the iGPU's BAR0. PrimeBridge checks this and refuses otherwise.
 
 ## Installation
 
-Download `PrimeBridge-0.4.8.zip` from the [Releases](../../releases) page. It contains:
+Download `PrimeBridge-0.4.9.zip` from the [Releases](../../releases) page. It contains:
 
 | File | md5 of the binary |
 |---|---|
-| `PrimeBridge.kext` | `5048ff6bac5cc0ae7ac8b1beb6f4d838` |
-| `NVRMFB.kext` (NullMoth 2.6.3 with the `nvfbforce` patch) | `6a3402872b7b14a5485aeda97afc7df2` |
+| `PrimeBridge.kext` | `6dd9364d0a3946162ad2f01d5ab932eb` |
+| `NVRMFB.kext` (NullMoth 2.6.3 + `nvfbforce`; a 2.6.6 build has its own md5) | `6a3402872b7b14a5485aeda97afc7df2` |
 | `install-nvrmfb.sh` | |
 
-1. Get macOS booting with NullMoth 2.6.3 on an external monitor first.
+> [!IMPORTANT]
+> Match `NVRMFB.kext` to your NullMoth version. The released kext is patched for NullMoth 2.6.3. If you run 2.6.6, apply `NVRMFB-patch/nvfbforce.patch` to the 2.6.6 `kexts/NVRMFB/fb/nvrm-fb.cpp` (byte-identical to 2.6.3) and build it, instead of installing the 2.6.3 kext over your 2.6.6 one.
+
+1. Get macOS booting with NullMoth (2.6.3 or 2.6.6) on an external monitor first.
 2. Install the patched NVRMFB from the unzipped folder:
    ```bash
    sudo sh install-nvrmfb.sh
@@ -78,7 +83,7 @@ Download `PrimeBridge-0.4.8.zip` from the [Releases](../../releases) page. It co
 ### Rollback
 
 - Black internal screen: plug an HDMI monitor into the NVIDIA GPU (the fake connector exists only when nothing is plugged in), or add `-primeoff` to the boot-args to stop PrimeBridge.
-- Original NVRMFB: `sudo sh install-nvrmfb.sh NVRMFB-2.6.3-orig.kext`, then reboot.
+- Original NVRMFB: `sudo sh install-nvrmfb.sh NVRMFB-orig.kext`, then reboot.
 
 ## Checking that it works
 
@@ -92,7 +97,7 @@ ioreg -rc PrimeBridge -d1 | grep -E "Version|PrimeMode"
 A healthy start:
 
 ```
-PrimeBridge 0.4.8 starting (log=1)
+PrimeBridge 0.4.9 starting (log=1)
 FB 1920x1080 bpp 32 stride 7680 B ... phys 0x490000000 ... BAR0 0x490000000 +0x10000000
 found NVRMNVDAFramebuffer 1920x1080 pitch 7680 phys 0x...
 redirected NVRMNVDAFramebuffer scanout kva to cached staging (8294400 bytes)
@@ -157,7 +162,7 @@ AMD Vanilla's own README says the patch does not improve performance and that so
 
 Direct mode needs the NVIDIA mode to equal the GOP framebuffer: same width, height and pitch (width x 4). The GOP usually runs the panel at its native resolution, which the `FB ...` log line shows. If it is not 1920x1080, PrimeBridge stays in staging mode and copies only the top-left 1920x1080 (cropped and slower).
 
-The fix is a forced EDID with the panel's resolution in `kForcedEdid[128]` in `nvrm-fb.cpp` (see `nvfbforce.patch`), then a rebuild of NVRMFB from the NullMoth 2.6.3 sources.
+The fix is a forced EDID with the panel's resolution in `kForcedEdid[128]` in `nvrm-fb.cpp` (see `nvfbforce.patch`), then a rebuild of NVRMFB from the NullMoth 2.6.3 or 2.6.6 sources (identical files).
 
 - The mode lives in the first detailed timing descriptor, bytes 54 to 71. Byte 127 is the checksum: all 128 bytes must sum to 0 mod 256. The range-limits descriptor (`00 00 00 fd`) must allow the new refresh rate and pixel clock.
 - Generate the EDID with a tool (an EDID editor, or `cvt -r` / `cvt` timings typed into one) and check it with `edid-decode`. Do not hand-edit it without recomputing the checksum.
@@ -166,7 +171,9 @@ The fix is a forced EDID with the panel's resolution in `kForcedEdid[128]` in `n
 
 ### A different iGPU
 
-The register offsets in `PrimeBridge.cpp` (`kRegFbOffset`, `kRegOtg0*`) come from the Linux amdgpu headers for Rembrandt: `yellow_carp_offset.h` (GC_BASE seg0 `0x1260`, DCN_BASE seg2 `0x34C0`), `gc_10_3_0_offset.h` and `dcn_3_1_2_offset.h`. For another APU (780M, 760M, Vega), change the PCI ID in `Info.plist` and take the offsets from that chip's Linux headers. The `MATCH` check protects against a wrong address.
+`selectRegisterLayout()` picks a register table from the PCI device ID: `kLayoutRembrandt` for the 680M (`1002:1681`, GC 10.3.3 / DCN 3.1.2) and `kLayoutPhoenix` for the Phoenix/Hawk Point family (`15BF`, `15C8`, `1900`, `1901`, GC 11.0.x / DCN 3.1.x). The tables live in `PrimeBridge.cpp` and come from Linux amdgpu: `yellow_carp_offset.h` / `gc_10_3_0_offset.h` / `dcn_3_1_2_offset.h` for Rembrandt, and `gc_11_0_0_offset.h` / `dcn_3_1_4_offset.h` for Phoenix. GC 11.0.4 (HawkPoint2) uses `gfxhub_v3_0`, which reads `GCMC_VM_FB_OFFSET << 24` the same way as the 680M.
+
+The GC and DCN segment bases (`0x1260` and `0x34C0`) come from the APU's IP discovery table, not from a public header. They are correct for the machines tested so far and are the values this project already used. If a probe reports implausible offsets, override them from the boot-args below and check the `MATCH` line in the log.
 
 ### Another NullMoth version
 
@@ -182,6 +189,13 @@ The `0x2d8` (`fKva`), `0x2e0`, `0x2f0`, `0x2f4` and `0x2f8` offsets in `attachNv
 | `primehz=N` | Staging timer rate (default 60, 24 to 240) |
 | `primefmt=N` | Pixel packing in staging mode: 1 = BGRX (default), 2 = RGBX, 3 = raw. Direct mode runs only with 1 |
 | `primetest=1/2/3`, `primecolors=1` | Test patterns on the panel during boot, for checking colors and stride |
+| `primegcb=0xNNN` | Override the GC segment 0 base (dwords, default `0x1260`) |
+| `primedcnb=0xNNN` | Override the DCN/DMU segment 2 base (dwords, default `0x34C0`) |
+| `primefbofs=0xNNN` | Override the `GCMC_VM_FB_OFFSET` register offset (dwords) |
+| `primefbbase=0xNNN`, `primefbtop=0xNNN` | Override the `GCMC_VM_FB_LOCATION_BASE/TOP` register offsets (dwords) |
+| `primeotgctl=0xNNN`, `primeotgh=0xNNN`, `primeotgv=0xNNN`, `primeotgf=0xNNN`, `primeotgs=0xNNN` | Override the OTG0 control/h_total/v_total/frame-count register offsets and the OTG instance stride (dwords) |
+
+All register overrides are unsigned hex values in Linux amdgpu's dword units, e.g. `primegcb=0x1260`. Values are accepted in decimal, `0x` hex, `0b` binary or octal, like every other macOS boot-arg. A layout whose computed byte offsets fall outside `kBar5MapLen` (0x80000) is rejected and the probe is skipped; the redirect itself does not depend on these registers.
 
 ## Building
 
@@ -220,7 +234,7 @@ Diagnose from `/var/log/PrimeBridge.log` and `ioreg -rc PrimeBridge` before chan
 | Path | What it is |
 |---|---|
 | `PrimeBridge-source/` | Driver sources and `build.sh` |
-| `NVRMFB-patch/nvfbforce.patch` | The change to NullMoth's `kexts/NVRMFB/fb/nvrm-fb.cpp` (tag v2.6.3) |
+| `NVRMFB-patch/nvfbforce.patch` | The change to NullMoth's `kexts/NVRMFB/fb/nvrm-fb.cpp` (tag v2.6.3, identical in v2.6.6) |
 | `NVRMFB-patch/NullMoth-LICENSE`, `NullMoth-NOTICE` | NullMoth's license and notice |
 | `install-nvrmfb.sh` | Installs the patched `NVRMFB.kext`, keeps your original, rebuilds the auxiliary kernel collection |
 | `llms.txt` | Full technical notes in one file |
@@ -229,4 +243,4 @@ Diagnose from `/var/log/PrimeBridge.log` and `ioreg -rc PrimeBridge` before chan
 
 PrimeBridge (`PrimeBridge-source/`, `install-nvrmfb.sh` and the docs) is under the [MIT License](LICENSE). You can use, modify and redistribute it for free. Any copy or derived work has to keep the copyright notice, which carries the link to this repository.
 
-`NVRMFB-patch/` and the patched `NVRMFB.kext` are derived from NullMoth 2.6.3 and stay under the [PolyForm Noncommercial License 1.0.0](NVRMFB-patch/NullMoth-LICENSE): noncommercial use only. Copyright (c) 2026 NullMoth Systems ([nullmothsystems.com](https://nullmothsystems.com)). This project is not affiliated with NullMoth Systems.
+`NVRMFB-patch/` and the patched `NVRMFB.kext` are derived from NullMoth 2.6.x and stay under the [PolyForm Noncommercial License 1.0.0](NVRMFB-patch/NullMoth-LICENSE): noncommercial use only. Copyright (c) 2026 NullMoth Systems ([nullmothsystems.com](https://nullmothsystems.com)). This project is not affiliated with NullMoth Systems.

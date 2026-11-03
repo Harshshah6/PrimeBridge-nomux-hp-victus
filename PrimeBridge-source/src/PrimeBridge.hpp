@@ -43,6 +43,7 @@ private:
     void tickNullMoth(IOTimerEventSource *sender);
     bool findNvidiaFramebuffer();
     bool attachNvidiaScanout();
+    void selectRegisterLayout();
     void probeIgpu();
     void chooseWriteMapping(uint64_t vramGop);
     void logf(const char *fmt, ...) __printflike(2, 3);
@@ -85,7 +86,23 @@ private:
     uint64_t            statBlit_        {0};
     uint64_t            statRows_        {0};
 
-    // Read-only 680M diagnostics: its register BAR and the running OTG's frame counter (panel refresh)
+    // iGPU BAR5 register byte offsets. Selected from the PCI device ID in setup() so the
+    // 680M (GC 10.3.3 / DCN 3.1.2) path is unchanged while Phoenix/HawkPoint
+    // (GC 11.0.x / DCN 3.1.4) gets its own GC offsets. Every value can be overridden
+    // with the primegcb/primedcnb/primefbo*/primeotg* boot-args for bring-up.
+    uint32_t            gcBase_          {0};   // GC segment 0 base, in dwords
+    uint32_t            dcnBase_         {0};   // DCN/DMU segment 2 base, in dwords
+    uint32_t            regFbOffset_     {0};
+    uint32_t            regFbLocBase_    {0};
+    uint32_t            regFbLocTop_     {0};
+    uint32_t            regOtg0Ctl_      {0};
+    uint32_t            regOtg0HTotal_   {0};
+    uint32_t            regOtg0VTotal_   {0};
+    uint32_t            regOtg0Frames_   {0};
+    uint32_t            otgStride_       {0};
+    bool                regLayoutValid_  {false}; // all offsets fit inside kBar5MapLen
+
+    // Read-only iGPU diagnostics: its register BAR and the running OTG's frame counter (panel refresh)
     IOMemoryMap        *mmio_            {nullptr};
     volatile uint32_t  *regs_            {nullptr};
     uint32_t            otgFrameReg_     {0};   // byte offset in regs_, 0 = no OTG found

@@ -8,8 +8,8 @@
   <key>CFBundleName</key>                <string>PrimeBridge</string>
   <key>CFBundlePackageType</key>         <string>KEXT</string>
   <key>CFBundleExecutable</key>          <string>PrimeBridge</string>
-  <key>CFBundleVersion</key>             <string>0.4.8</string>
-  <key>CFBundleShortVersionString</key>  <string>0.4.8</string>
+  <key>CFBundleVersion</key>             <string>0.4.9</string>
+  <key>CFBundleShortVersionString</key>  <string>0.4.9</string>
   <key>OSBundleCompatibleVersion</key>   <string>0.1.0</string>
   <key>OSBundleRequired</key>            <string>Root</string>
   <key>IOKitPersonalities</key>
@@ -19,9 +19,9 @@
       <key>CFBundleIdentifier</key> <string>com.myvo.PrimeBridge</string>
       <key>IOClass</key>            <string>PrimeBridge</string>
       <key>IOProviderClass</key>    <string>IOPCIDevice</string>
-      <key>IOPCIPrimaryMatch</key>  <string>0x16811002</string> <!-- Radeon 680M -->
+      <key>IOPCIPrimaryMatch</key>  <string>0x19011002 0x19001002 0x15BF1002 0x15C81002 0x16811002</string> <!-- HawkPoint2/HawkPoint1/Phoenix1/Phoenix2/680M -->
       <key>IOMatchCategory</key>    <string>IOFramebuffer</string> <!-- prevents IONDRVFramebuffer on VGA@0 -->
-      <key>IOProbeScore</key>       <integer>30000</integer>
+      <key>IOProbeScore</key>       <integer>70000</integer> <!-- must outrank NMAmdFB (60000) -->
     </dict>
   </dict>
   <key>OSBundleLibraries</key>

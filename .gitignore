@@ -6,5 +6,11 @@ PrimeBridge-source/dist/
 # Built kexts go in Releases, not in the tree
 *.kext/
 
+# Release archives go on the GitHub Releases page, not in the tree
+*.zip
+
+# Command Code session state
+.commandcode/
+
 # macOS
 .DS_Store
