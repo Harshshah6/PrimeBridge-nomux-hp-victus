@@ -1,0 +1,119 @@
+diff --git a/kexts/NVRMFB/fb/nvrm-fb.cpp b/kexts/NVRMFB/fb/nvrm-fb.cpp
+index e900e42..f8fbc87 100644
+--- a/kexts/NVRMFB/fb/nvrm-fb.cpp
++++ b/kexts/NVRMFB/fb/nvrm-fb.cpp
+@@ -837,6 +837,46 @@ static NvU32 nvrmQueryHdaConnectorType(struct NvKmsKapiFunctionsTable *kms, stru
+     return kms->getConnectorInfo(device, connector, &info) ? nvrmHdaConnectorType(&info) : 0;
+ }
+ static struct NvKmsKapiDevice *gDev;
++static struct NvKmsKapiFunctionsTable *gKms;   // nvrmForce probes the real connection state through this
++// nvfbforce=1: when nothing is plugged in, force one HDMI connector "connected" with this EDID so a head
++// exists, WindowServer composites on the NVIDIA GPU and PrimeBridge copies frames to the iGPU panel.
++// A real monitor always wins: the forced EDID is only substituted when the port is actually empty.
++static NvKmsKapiDisplay gForcedDpy = 0;
++static const NvU8 kForcedEdid[256] = {   // "PrimeBridge", 1920x1080@144 (CVT-RB 320 MHz) + CTA-861 extension
++    0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x3a, 0xac, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0x14, 0x20, 0x01, 0x04, 0xa5, 0x22, 0x13, 0x78, 0x0e, 0xee, 0x91, 0xa3, 0x54, 0x4c, 0x99, 0x26,
++    0x0f, 0x50, 0x54, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
++    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0xfd, 0x7c, 0x80, 0x50, 0x70, 0x38, 0x1f, 0x40, 0x08, 0x20,
++    0x35, 0x00, 0x58, 0xc1, 0x10, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, 0xfc, 0x00, 0x50, 0x72, 0x69,
++    0x6d, 0x65, 0x42, 0x72, 0x69, 0x64, 0x67, 0x65, 0x0a, 0x20, 0x00, 0x00, 0x00, 0xfd, 0x00, 0x30,
++    0xa5, 0x1e, 0xb9, 0x24, 0x00, 0x0a, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x02, 0x3a, 0x80, 0x18,
++    0x71, 0x38, 0x2d, 0x40, 0x58, 0x2c, 0x45, 0x00, 0x58, 0xc1, 0x10, 0x00, 0x00, 0x1e, 0x01, 0x50,
++    0x02, 0x03, 0x17, 0x70, 0x42, 0x90, 0x3f, 0x67, 0x03, 0x0c, 0x00, 0x10, 0x00, 0x00, 0x44, 0x67,
++    0xd8, 0x5d, 0xc4, 0x01, 0x78, 0x00, 0x00, 0x8d, 0x3e, 0x80, 0x50, 0x70, 0x38, 0x20, 0x40, 0x08,
++    0x20, 0x38, 0x00, 0x58, 0xc1, 0x10, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7a,
++};
++static void nvrmForce(struct NvKmsKapiDynamicDisplayParams *dd)
++{
++    if (!gForcedDpy || dd->handle != gForcedDpy) return;
++    if (gKms && gDev) {
++        struct NvKmsKapiDynamicDisplayParams *p =
++            (struct NvKmsKapiDynamicDisplayParams *)IOMalloc(sizeof *p);
++        if (p) {
++            nvu_zero(p, sizeof *p);
++            p->handle = dd->handle;
++            const NvBool realConnected = gKms->getDynamicDisplayInfo(gDev, p) && p->connected;
++            IOFree(p, sizeof *p);
++            if (realConnected) return;
++        }
++    }
++    dd->forceConnected = NV_TRUE; dd->overrideEdid = NV_TRUE;
++    dd->edid.bufferSize = sizeof kForcedEdid; nvu_copy(dd->edid.buffer, kForcedEdid, sizeof kForcedEdid);
++}
+ static struct nvrm_dpy_rec gDpy[NVKMS_KAPI_MAX_CONNECTORS * 2];
+ static int gNDpy = -1;
+ // How many displays the boot enumeration found. A framebuffer whose display index is >= this exists because a display
+@@ -1173,8 +1213,18 @@ bool NVRMNVDAFramebuffer::kapiInit()
+         struct NvKmsKapiDynamicDisplayParams *dd = (struct NvKmsKapiDynamicDisplayParams *)IOMalloc(sizeof *dd);
+         if (!dd) return false;
+         gNDpy = 0;
+-        for (NvU32 i = 0; i < n; i++) {
+-            nvu_zero(dd, sizeof *dd); dd->handle = handles[i];
++        gKms = fKms;
++        uint32_t force = 0;
++        PE_parse_boot_argn("nvfbforce", &force, sizeof force);
++        for (int pass = 0; pass < (force ? 2 : 1) && gNDpy == 0; pass++)
++        for (NvU32 i = 0; i < n && !(pass && gNDpy); i++) {
++            if (pass) {
++                struct NvKmsKapiStaticDisplayInfo hs = {};
++                if (!fKms->getStaticDisplayInfo(fDev, handles[i], &hs) ||
++                    nvrmQueryHdaConnectorType(fKms, fDev, hs.connectorHandle) != 0x800) continue;
++                gForcedDpy = handles[i];
++            }
++            nvu_zero(dd, sizeof *dd); dd->handle = handles[i]; nvrmForce(dd);
+             if (!nvrmDynamicDisplayInfo(fKms, fDev, dd)) {
+                 FBLOG("dpy %u/%u 0x%x: getDynamicDisplayInfo FAILED", i, n, handles[i]);
+                 continue;
+@@ -1189,7 +1239,9 @@ bool NVRMNVDAFramebuffer::kapiInit()
+             if (gNDpy >= (int)(sizeof gDpy / sizeof gDpy[0])) { FBLOG("dpy table full at %d", gNDpy); break; }
+             struct nvrm_dpy_rec *r = &gDpy[gNDpy++];
+             r->connected = dd->connected ? NV_TRUE : NV_FALSE; r->mst = si.isDpMST; r->vrr = dd->vrrSupported;
+-            r->handle = handles[i]; r->connector = si.connectorHandle; r->headMask = si.headMask; r->internal = si.internal;
++            r->handle = handles[i]; r->connector = si.connectorHandle; r->headMask = si.headMask; r->internal = si.internal ||
++                (dd->edid.bufferSize == sizeof kForcedEdid &&
++                 memcmp(dd->edid.buffer, kForcedEdid, sizeof kForcedEdid) == 0);
+             r->hdaConnectorType = si.internal ? 0 : nvrmQueryHdaConnectorType(fKms, fDev, si.connectorHandle);
+             r->edidSize = dd->edid.bufferSize > sizeof r->edid ? (NvU32)sizeof r->edid : dd->edid.bufferSize;
+             nvu_copy(r->edid, dd->edid.buffer, r->edidSize);
+@@ -1860,7 +1912,7 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
+     for (NvU32 i = 0; i < n; i++) {
+         bool known = false; int kdpy = -1;
+         for (int k = 0; k < gNDpy; k++) if (gDpy[k].handle == handles[i]) { known = true; kdpy = k; break; }
+-        nvu_zero(dd, sizeof *dd); dd->handle = handles[i];
++        nvu_zero(dd, sizeof *dd); dd->handle = handles[i]; nvrmForce(dd);
+         bool dynOk = nvrmDynamicDisplayInfo(me->fKms, me->fDev, dd);
+         if (known) {
+             // 1401/driver issue #110: switching the monitor to another input and back left it with no picture. The link
+@@ -1923,7 +1975,9 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
+         if (gNDpy >= (int)(sizeof gDpy / sizeof gDpy[0])) break;
+         struct nvrm_dpy_rec *r = &gDpy[gNDpy];
+         r->connected = dd->connected ? NV_TRUE : NV_FALSE; r->mst = si.isDpMST; r->vrr = dd->vrrSupported;
+-            r->handle = handles[i]; r->connector = si.connectorHandle; r->headMask = si.headMask; r->internal = si.internal;
++            r->handle = handles[i]; r->connector = si.connectorHandle; r->headMask = si.headMask; r->internal = si.internal ||
++                (dd->edid.bufferSize == sizeof kForcedEdid &&
++                 memcmp(dd->edid.buffer, kForcedEdid, sizeof kForcedEdid) == 0);
+         r->hdaConnectorType = si.internal ? 0 : nvrmQueryHdaConnectorType(me->fKms, me->fDev, si.connectorHandle);
+         r->edidSize = dd->edid.bufferSize > sizeof r->edid ? (NvU32)sizeof r->edid : dd->edid.bufferSize;
+         nvu_copy(r->edid, dd->edid.buffer, r->edidSize);
+@@ -3291,6 +3345,15 @@ void NVRMNVDAFramebuffer::publishBacklight()
+             }
+         }
+     }
++    if (r != kIOReturnSuccess) {
++        OSDictionary *m = IOService::serviceMatching("PrimeBridge");
++        OSIterator *it = m ? IOService::getMatchingServices(m) : nullptr;
++        if (m) m->release();
++        IOService *pb = it ? OSDynamicCast(IOService, it->getNextObject()) : nullptr;
++        if (pb) { pb->retain(); rm = pb; level = 80; r = kIOReturnSuccess;
++                  FBLOG("fb%u: no NVKMS backlight -- using PrimeBridge for the panel backlight", fIndex); }
++        if (it) it->release();
++    }
+     if (r != kIOReturnSuccess) { FBLOG("fb%u: internal panel, but NVKMS registered no backlight (0x%x) -- no brightness control", fIndex, r); return; }
+     fBacklight = NVRMBacklightHandler::withRM(rm, level);
+     if (fBacklight && viaAux) fBacklight->useEdpAux(fGpuId, (unsigned)fDisplay, caps);

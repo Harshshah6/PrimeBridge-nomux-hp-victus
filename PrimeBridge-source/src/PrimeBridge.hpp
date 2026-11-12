@@ -33,6 +33,10 @@ public:
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
 
+    // Called by NullMoth's backlight handler ("NVRMBacklight", as if it were NVRM) so the brightness
+    // slider and keys drive the iGPU panel's DCN PWM backlight instead of the (absent) NVIDIA panel.
+    IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) override;
+
     // Optional explicit source registration API
     bool registerFrameSource(PrimeFrameSource *src);
     void unregisterFrameSource(PrimeFrameSource *src);
@@ -46,6 +50,7 @@ private:
     void selectRegisterLayout();
     void probeIgpu();
     void chooseWriteMapping(uint64_t vramGop);
+    void setPanelBrightness(uint32_t pct);
     void logf(const char *fmt, ...) __printflike(2, 3);
     void logFlush();
     void logShutdown();
@@ -62,6 +67,7 @@ private:
     const OSSymbol     *symScanoutInfo_  {nullptr};
     IOService          *nvfb_            {nullptr};
     uint8_t            *origNvKva_       {nullptr};
+    size_t              nvfbKvaOff_      {0};   // fKva offset inside NVRMNVDAFramebuffer, found by scan
     uint8_t            *staging_         {nullptr};
     uint8_t            *shadow_          {nullptr};
     size_t              stagingSize_     {0};

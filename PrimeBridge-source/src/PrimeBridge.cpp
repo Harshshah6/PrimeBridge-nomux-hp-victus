@@ -46,18 +46,34 @@ static constexpr IgpuRegLayout kLayoutRembrandt = {
     0x1b41, 0x1b2a, 0x1b2f, 0x1b4c, 0x80,
 };
 
-// Phoenix / Hawk Point (740M/760M/780M, GC 11.0.x, DCN 3.1.x). All GC 11.0.x
-// revisions share gc_11_0_0_offset.h: 0x15a7 / 0x1678 / 0x1679. GC 11.0.4
-// (HawkPoint2 740M) uses gfxhub_v3_0, which reads GCMC_VM_FB_OFFSET << 24 just
-// like the 680M's gfxhub_v2_1. DCN 3.1.2 and 3.1.4 have identical OTG offsets,
-// and the SOC15 segment bases are the same as Rembrandt.
+// Phoenix (740M/760M/780M, GC 11.0.0-11.0.2, DCN 3.1.x). gc_11_0_0_offset.h:
+// GCMC_VM_FB_OFFSET 0x15a7, GCMC_VM_FB_LOCATION_BASE/TOP 0x1678 / 0x1679.
 static constexpr IgpuRegLayout kLayoutPhoenix = {
-    "Phoenix/HawkPoint (GC 11.0.x / DCN 3.1.x)",
+    "Phoenix (GC 11.0.x / DCN 3.1.x)",
     0x1260, 0x34C0, 0x15a7, 0x1678, 0x1679,
     0x1b41, 0x1b2a, 0x1b2f, 0x1b4c, 0x80,
 };
 
+// Hawk Point / Hawk Point 2 (760M/780M/740M, GC 11.0.3-11.0.4). gc_11_0_3_offset.h
+// moved GCMC_VM_FB_LOCATION_BASE/TOP to 0x1688 / 0x1689 (GCMC_VM_FB_OFFSET is still
+// 0x15a7). DCN 3.1.4 OTG offsets and the SOC15 segment bases are the same.
+static constexpr IgpuRegLayout kLayoutHawkPoint = {
+    "HawkPoint (GC 11.0.3/11.0.4 / DCN 3.1.4)",
+    0x1260, 0x34C0, 0x15a7, 0x1688, 0x1689,
+    0x1b41, 0x1b2a, 0x1b2f, 0x1b4c, 0x80,
+};
+
 static constexpr uint32_t kBar5MapLen   = 0x80000;  // mapped window of BAR5
+
+// GC 11 APUs keep the VRAM window in the MMHUB block, not the GC block: Linux's
+// gmc_v11_0 -> mmhub_v3_0_get_fb_location reads MMMC_VM_FB_LOCATION_BASE/TOP there.
+// Offsets are from mmhub_3_0_0_offset.h; the segment base comes from IP discovery.
+static constexpr uint32_t kMmFbLocBase  = 0x08ec;   // MMMC_VM_FB_LOCATION_BASE
+static constexpr uint32_t kMmFbLocTop   = 0x08ed;   // MMMC_VM_FB_LOCATION_TOP
+
+// Panel backlight PWM, DCN segment 2 (dcn_3_1_4_offset.h / _sh_mask.h):
+// BL_ACTIVE_INT_FRAC_CNT [15:0] is the duty, BL_PWM_EN is bit 31.
+static constexpr uint32_t kBlPwmCntl    = 0x2f19;   // PWRSEQ0_BL_PWM_CNTL
 
 extern "C" int rdmsr_carefully(uint32_t msr, uint32_t *lo, uint32_t *hi);   // com.apple.kpi.unsupported
 
@@ -395,22 +411,21 @@ bool PrimeBridge::attachNvidiaScanout() {
     nvSize_    = req.actualSize;
     origNvKva_ = static_cast<uint8_t *>(req.kva);
 
-    // Dynamically verify NVRMNVDAFramebuffer's internal field offsets against req before touching 0x2d8.
-    // Offsets confirmed by disassembly of the shipped 2.6.3 binary:
-    //   0x2d8 = fKva, 0x2e0 = fPhys, 0x2f0 = fPitch, 0x2f4 = fW, 0x2f8 = fH.
-    const uint8_t *raw   = reinterpret_cast<const uint8_t *>(nvfb_);
-    void    *kvaAt2d8    = *reinterpret_cast<void * const volatile *>(raw + 0x2d8);
-    uint64_t physAt2e0   = *reinterpret_cast<const volatile uint64_t *>(raw + 0x2e0);
-    uint32_t pitchAt2f0  = *reinterpret_cast<const volatile uint32_t *>(raw + 0x2f0);
-    uint32_t widthAt2f4  = *reinterpret_cast<const volatile uint32_t *>(raw + 0x2f4);
-    uint32_t heightAt2f8 = *reinterpret_cast<const volatile uint32_t *>(raw + 0x2f8);
-
-    offsetsVerified_ = (kvaAt2d8 == req.kva &&
-                        physAt2e0 == req.phys &&
-                        pitchAt2f0 == req.pitch &&
-                        widthAt2f4 == req.width &&
-                        heightAt2f8 == req.height);
+    // Find fKva's offset inside NVRMNVDAFramebuffer instead of trusting a constant: NullMoth moved
+    // the private layout in 2.9. fKva is the u64 holding req.kva, immediately followed by fPhys, so
+    // scanning the object for that pair identifies it uniquely. The store is only made when found.
+    const uint8_t *raw = reinterpret_cast<const uint8_t *>(nvfb_);
+    size_t kvaOff = 0;
+    for (size_t o = 0x40; o + 16 <= 0x1000; o += 8) {
+        if (*reinterpret_cast<void * const volatile *>(raw + o) == req.kva &&
+            *reinterpret_cast<const volatile uint64_t *>(raw + o + 8) == req.phys) { kvaOff = o; break; }
+    }
+    offsetsVerified_ = (kvaOff != 0);
+    nvfbKvaOff_ = kvaOff;
     setProperty("NVFBOffsetsVerified", offsetsVerified_);
+    setProperty("NVFBKvaOffset", (uint64_t)nvfbKvaOff_, 64);
+    if (offsetsVerified_)
+        logf("NVRMNVDAFramebuffer fKva found at +0x%zx (fPhys at +0x%zx)", nvfbKvaOff_, nvfbKvaOff_ + 8);
 
     if (offsetsVerified_ && directVram_ == 0) {
         // Never shrink: NVRMFB's switchMode keeps fKva (= staging_), so after a mode change NVAccel
@@ -433,7 +448,7 @@ bool PrimeBridge::attachNvidiaScanout() {
             // Redirect NVRMNVDAFramebuffer's fKva (0x2d8) to cached system RAM staging_, so
             // NVAccel's performTransaction deposits frames into cached RAM instead of VRAM.
             __asm__ volatile("sfence" ::: "memory");
-            *reinterpret_cast<void * volatile *>(reinterpret_cast<uint8_t *>(nvfb_) + 0x2d8) = staging_;
+            *reinterpret_cast<void * volatile *>(reinterpret_cast<uint8_t *>(nvfb_) + nvfbKvaOff_) = staging_;
             __asm__ volatile("sfence" ::: "memory");
             setProperty("PrimeMode", "staging-redirect-ce-8bit");
             logf("redirected NVRMNVDAFramebuffer scanout kva to cached staging (%llu bytes)",
@@ -458,7 +473,9 @@ bool PrimeBridge::attachNvidiaScanout() {
 void PrimeBridge::selectRegisterLayout() {
     const uint16_t vendor = igpu_->configRead16(kIOPCIConfigVendorID);
     const uint16_t device = igpu_->configRead16(kIOPCIConfigDeviceID);
-    const IgpuRegLayout &layout = (device == 0x1681) ? kLayoutRembrandt : kLayoutPhoenix;
+    const IgpuRegLayout &layout = (device == 0x1681) ? kLayoutRembrandt
+                               : (device == 0x1900 || device == 0x1901) ? kLayoutHawkPoint
+                               : kLayoutPhoenix;
 
     uint32_t gcBase    = layout.gcBase;
     uint32_t dcnBase   = layout.dcnBase;
@@ -533,6 +550,40 @@ void PrimeBridge::selectRegisterLayout() {
 // Read-only groundwork for writing the 680M's memory directly instead of through BAR0, as Linux amdgpu
 // does on x86 APUs (gmc_v10_0.c): where that memory sits in system RAM, whether BAR0 and that address
 // show the same pixels, and the panel timing. Never writes; runs once, on a still screen.
+void PrimeBridge::setPanelBrightness(uint32_t pct)
+{
+    if (pct > 100) pct = 100;
+    if (!regs_ && igpu_) {
+        IODeviceMemory *bar5 = igpu_->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress5);
+        if (!mmio_ && bar5 && bar5->getLength() >= kBar5MapLen)
+            mmio_ = bar5->createMappingInTask(kernel_task, 0, kIOMapAnywhere | kIOMapInhibitCache, 0, kBar5MapLen);
+        if (mmio_) regs_ = reinterpret_cast<volatile uint32_t *>(mmio_->getVirtualAddress());
+    }
+    if (!regs_ || !dcnBase_) return;
+    const uint64_t boff = ((uint64_t)dcnBase_ + kBlPwmCntl) * 4;
+    if (boff + 4 > kBar5MapLen) return;
+    const uint32_t v = regs_[boff / 4];
+    const uint32_t duty = (uint32_t)((uint64_t)pct * 65535u / 100u);
+    if ((v & 0xFFFFu) == duty) return;   // unchanged: skip the write and the log line
+    regs_[boff / 4] = (v & ~0xFFFFu) | duty;
+    logf("brightness: panel %u%% (PWRSEQ0_BL_PWM_CNTL 0x%08x -> 0x%08x)", pct, v, regs_[boff / 4]);
+}
+
+IOReturn PrimeBridge::callPlatformFunction(const OSSymbol *fn, bool wait,
+                                           void *p1, void *p2, void *p3, void *p4)
+{
+    if (fn && fn->isEqualTo("NVRMBacklight")) {
+        // NullMoth's backlight handler: p2 == NULL reads the level, p2 != NULL sets p1 (percent).
+        if (!p2) {
+            if (p1) *(UInt32 *)p1 = 80;
+            return kIOReturnSuccess;
+        }
+        setPanelBrightness(p1 ? *(UInt32 *)p1 : 80);
+        return kIOReturnSuccess;
+    }
+    return IOService::callPlatformFunction(fn, wait, p1, p2, p3, p4);
+}
+
 void PrimeBridge::probeIgpu() {
     IODeviceMemory *bar5 = igpu_->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress5);
     if (!mmio_ && bar5 && bar5->getLength() >= 0x80000)
@@ -541,10 +592,48 @@ void PrimeBridge::probeIgpu() {
     if (!regLayoutValid_) { logf("igpu probe: register layout invalid, skipping"); return; }
     regs_ = reinterpret_cast<volatile uint32_t *>(mmio_->getVirtualAddress());
 
+    // primebright=N (0..100): scale the panel backlight PWM duty, as a direct test of whether the
+    // internal panel's backlight is driven by the DCN's PWRSEQ0_BL_PWM_CNTL (see kBlPwmCntl).
+    {
+        uint32_t bright = 0xFFFFFFFFu;
+        if (PE_parse_boot_argn("primebright", &bright, sizeof bright) && bright <= 100) {
+            const uint64_t boff = ((uint64_t)dcnBase_ + kBlPwmCntl) * 4;
+            if (boff + 4 <= kBar5MapLen) {
+                const uint32_t v = regs_[boff / 4];
+                const uint32_t cur = v & 0xFFFFu;
+                const uint32_t nd  = (uint32_t)((uint64_t)cur * bright / 100u);
+                regs_[boff / 4] = (v & ~0xFFFFu) | nd;
+                logf("brightness: PWRSEQ0_BL_PWM_CNTL 0x%08x duty %u -> %u (%u%%) at 0x%llx",
+                     v, cur, nd, bright, boff);
+            } else {
+                logf("brightness: backlight register outside BAR5");
+            }
+        }
+    }
+
     const uint32_t off = regs_[regFbOffset_ / 4], base = regs_[regFbLocBase_ / 4], top = regs_[regFbLocTop_ / 4];
-    const uint64_t vramPhys = (uint64_t)(off & 0xFFFFFFu) << 24;
-    const uint64_t vramSize = (top & 0xFFFFFFu) >= (base & 0xFFFFFFu)
-                            ? (uint64_t)((top & 0xFFFFFFu) - (base & 0xFFFFFFu) + 1) << 24 : 0;
+    uint64_t vramPhys = (uint64_t)(off & 0xFFFFFFu) << 24;
+    uint64_t vramSize = (top & 0xFFFFFFu) >= (base & 0xFFFFFFu)
+                      ? (uint64_t)((top & 0xFFFFFFu) - (base & 0xFFFFFFu) + 1) << 24 : 0;
+    // GC 10.x (Rembrandt) keeps the window in the GC block and the reads above work.
+    // On GC 11 (Phoenix/Hawk Point) those registers read 0 because the window lives in
+    // the MMHUB block. Try the known MMHUB segment bases; the MATCH check below rejects
+    // a wrong pick, so this only ever adds a chance at direct mode.
+    if (!vramPhys || !vramSize) {
+        static constexpr uint32_t kMmBases[] = { 0x1A000, 0x13200 };
+        for (uint32_t mb : kMmBases) {
+            const uint64_t bOff = ((uint64_t)mb + kMmFbLocBase) * 4;
+            const uint64_t tOff = ((uint64_t)mb + kMmFbLocTop) * 4;
+            if (bOff + 4 > kBar5MapLen || tOff + 4 > kBar5MapLen) continue;
+            const uint32_t mbBase = regs_[bOff / 4], mbTop = regs_[tOff / 4];
+            if (!(mbBase & 0xFFFFFFu) || (mbTop & 0xFFFFFFu) < (mbBase & 0xFFFFFFu)) continue;
+            vramPhys = (uint64_t)(mbBase & 0xFFFFFFu) << 24;
+            vramSize = (uint64_t)((mbTop & 0xFFFFFFu) - (mbBase & 0xFFFFFFu) + 1) << 24;
+            logf("igpu probe: MMHUB seg 0x%x MMMC_VM_FB_LOCATION 0x%08x..0x%08x -> VRAM 0x%llx, %llu MB",
+                 mb, mbBase, mbTop, vramPhys, vramSize >> 20);
+            break;
+        }
+    }
     const uint64_t gopOff = fb_.physAddr() - fb_.bar0Phys(), len = (uint64_t)fb_.stride() * fb_.height();
     logf("igpu probe: FB_OFFSET 0x%08x FB_LOCATION 0x%08x..0x%08x -> VRAM at phys 0x%llx, %llu MB; GOP at VRAM +0x%llx",
          off, base, top, vramPhys, vramSize >> 20, gopOff);
@@ -584,10 +673,33 @@ void PrimeBridge::probeIgpu() {
         uint32_t carve = 1;
         PE_parse_boot_argn("primecarve", &carve, sizeof(carve));
         if (match && carve) chooseWriteMapping(vramPhys + gopOff);
+        else if (carve) {
+            // The VRAM address did not verify. Direct mode does not actually need it: the panel
+            // is scanned out of BAR0, so if BAR0 write-combined is fast we can still point the
+            // scanout straight at the GOP framebuffer.
+            if (fb_.bar0Len() && fb_.physAddr() >= fb_.bar0Phys() &&
+                fb_.physAddr() + len <= fb_.bar0Phys() + fb_.bar0Len())
+                chooseWriteMapping(fb_.physAddr());
+            else
+                logf("igpu probe: GOP 0x%llx outside BAR0 [0x%llx +0x%llx], no BAR0 direct mode",
+                     fb_.physAddr(), fb_.bar0Phys(), fb_.bar0Len());
+        }
     } else {
         if (ram) ram->release();
         probed_ = true;
         logf("igpu probe: no comparison (VRAM address implausible or not mappable, or no reference frame)");
+        // Direct mode does not actually need the VRAM carveout address: the panel is scanned
+        // out of BAR0, so if BAR0 write-combined is fast enough we can point the scanout
+        // straight at the GOP framebuffer. Benchmark BAR0 against BAR0-WC only.
+        uint32_t carve = 1;
+        PE_parse_boot_argn("primecarve", &carve, sizeof(carve));
+        if (carve && fb_.bar0Len() && fb_.physAddr() >= fb_.bar0Phys() &&
+            fb_.physAddr() + len <= fb_.bar0Phys() + fb_.bar0Len()) {
+            chooseWriteMapping(fb_.physAddr());
+        } else if (carve) {
+            logf("igpu probe: GOP 0x%llx outside BAR0 [0x%llx +0x%llx], no BAR0 direct mode",
+                 fb_.physAddr(), fb_.bar0Phys(), fb_.bar0Len());
+        }
     }
 
     // Panel timing: the OTG the GOP left running drives the panel.
@@ -721,7 +833,7 @@ void PrimeBridge::tickNullMoth(IOTimerEventSource *t) {
                 // can never re-match (self-deadlock: frozen frame + reset loop).
                 if (nvfb_ && origNvKva_ && offsetsVerified_) {
                     __asm__ volatile("sfence" ::: "memory");
-                    *reinterpret_cast<void * volatile *>(reinterpret_cast<uint8_t *>(nvfb_) + 0x2d8) = origNvKva_;
+                    *reinterpret_cast<void * volatile *>(reinterpret_cast<uint8_t *>(nvfb_) + nvfbKvaOff_) = origNvKva_;
                     __asm__ volatile("sfence" ::: "memory");
                 }
                 redirected_ = false;
@@ -779,7 +891,9 @@ void PrimeBridge::tickNullMoth(IOTimerEventSource *t) {
     } else {
         idleTicks_++;
     }
-    if (!lowFreqMode_ && idleTicks_ >= 30) lowFreqMode_ = true;
+    // Idle throttling removed: dropping the copy to 20 Hz on a still screen read as
+    // "stuck at 20 Hz" whenever content changed slowly. Keep the steady target rate.
+    (void)idleTicks_;
 
     // Update IORegistry diagnostics + flush the log file + log effective rate ~5 s.
     if (++statTick_ >= 720) {
@@ -813,7 +927,7 @@ void PrimeBridge::tickNullMoth(IOTimerEventSource *t) {
         if (fastWrites_ && !directKva_ && redirected_ && staging_ && offsetsVerified_ && pixelFmt_ == 1 && !mirrorExternal_ &&
             nvWidth_ == fb_.width() && nvHeight_ == fb_.height() && nvPitch_ == fb_.stride()) {
             __asm__ volatile("sfence" ::: "memory");
-            *reinterpret_cast<void * volatile *>(reinterpret_cast<uint8_t *>(nvfb_) + 0x2d8) = fb_.base();
+            *reinterpret_cast<void * volatile *>(reinterpret_cast<uint8_t *>(nvfb_) + nvfbKvaOff_) = fb_.base();
             __asm__ volatile("sfence" ::: "memory");
             directKva_ = true;
             setProperty("PrimeMode", "direct-kva");
@@ -866,7 +980,7 @@ void PrimeBridge::cleanup() {
     // Restore original NVRMNVDAFramebuffer scanout pointer before freeing staging_.
     if (nvfb_ && staging_ && origNvKva_ && offsetsVerified_) {
         __asm__ volatile("sfence" ::: "memory");
-        *reinterpret_cast<void * volatile *>(reinterpret_cast<uint8_t *>(nvfb_) + 0x2d8) = origNvKva_;
+        *reinterpret_cast<void * volatile *>(reinterpret_cast<uint8_t *>(nvfb_) + nvfbKvaOff_) = origNvKva_;
         __asm__ volatile("sfence" ::: "memory");
     }
     // NVAccel's performTransaction may still be mid-write into staging_ on its own
