@@ -672,7 +672,7 @@ void PrimeBridge::probeIgpu() {
         if (diffRef || match) probed_ = true;   // a dark screen is tried again on a later still screen
         uint32_t carve = 1;
         PE_parse_boot_argn("primecarve", &carve, sizeof(carve));
-        if (match && carve) chooseWriteMapping(vramPhys + gopOff);
+        if (match && carve && shadow_) chooseWriteMapping(vramPhys + gopOff);
         else if (carve) {
             // The VRAM address did not verify. Direct mode does not actually need it: the panel
             // is scanned out of BAR0, so if BAR0 write-combined is fast we can still point the
@@ -693,7 +693,7 @@ void PrimeBridge::probeIgpu() {
         // straight at the GOP framebuffer. Benchmark BAR0 against BAR0-WC only.
         uint32_t carve = 1;
         PE_parse_boot_argn("primecarve", &carve, sizeof(carve));
-        if (carve && fb_.bar0Len() && fb_.physAddr() >= fb_.bar0Phys() &&
+        if (carve && shadow_ && fb_.bar0Len() && fb_.physAddr() >= fb_.bar0Phys() &&
             fb_.physAddr() + len <= fb_.bar0Phys() + fb_.bar0Len()) {
             chooseWriteMapping(fb_.physAddr());
         } else if (carve) {
@@ -895,6 +895,20 @@ void PrimeBridge::tickNullMoth(IOTimerEventSource *t) {
     // "stuck at 20 Hz" whenever content changed slowly. Keep the steady target rate.
     (void)idleTicks_;
 
+    // Probe the iGPU as soon as the screen has been still, then switch to direct the moment the
+    // write benchmark says it is fast. Both used to wait for the 720-tick statistics window, which
+    // held the direct-mode switch back by seconds after the redirect attached.
+    if (!probed_ && !anyRowChanged && (++probeTick_ & 15u) == 0u) probeIgpu();
+    if (fastWrites_ && !directKva_ && redirected_ && staging_ && offsetsVerified_ && pixelFmt_ == 1 && !mirrorExternal_ &&
+        nvWidth_ == fb_.width() && nvHeight_ == fb_.height() && nvPitch_ == fb_.stride()) {
+        __asm__ volatile("sfence" ::: "memory");
+        *reinterpret_cast<void * volatile *>(reinterpret_cast<uint8_t *>(nvfb_) + nvfbKvaOff_) = fb_.base();
+        __asm__ volatile("sfence" ::: "memory");
+        directKva_ = true;
+        setProperty("PrimeMode", "direct-kva");
+        logf("NVAccel now writes its frames straight into the panel's buffer (no staging copy, no diff)");
+    }
+
     // Update IORegistry diagnostics + flush the log file + log effective rate ~5 s.
     if (++statTick_ >= 720) {
         statTick_ = 0;
@@ -921,18 +935,6 @@ void PrimeBridge::tickNullMoth(IOTimerEventSource *t) {
              workNs / 720000, maxNs / 1000, blitNs / 720000, statRows_ / 720, panelHz100 / 100, panelHz100 % 100,
              directKva_ ? ", direct" : "");
         statWork_ = statWorkMax_ = statBlit_ = statRows_ = 0;
-        if (!probed_ && !anyRowChanged) probeIgpu();   // still screen: no BAR0 write in flight
-        // Once GOP writes are fast and the mode is the panel's, NVAccel writes each frame straight into the panel's
-        // buffer: no staging copy, no diff, no second clock. Raw BGRA is fine: the DCN ignores byte 3 (blitRow zeroes it).
-        if (fastWrites_ && !directKva_ && redirected_ && staging_ && offsetsVerified_ && pixelFmt_ == 1 && !mirrorExternal_ &&
-            nvWidth_ == fb_.width() && nvHeight_ == fb_.height() && nvPitch_ == fb_.stride()) {
-            __asm__ volatile("sfence" ::: "memory");
-            *reinterpret_cast<void * volatile *>(reinterpret_cast<uint8_t *>(nvfb_) + nvfbKvaOff_) = fb_.base();
-            __asm__ volatile("sfence" ::: "memory");
-            directKva_ = true;
-            setProperty("PrimeMode", "direct-kva");
-            logf("NVAccel now writes its frames straight into the panel's buffer (no staging copy, no diff)");
-        }
         logFlush();
     }
 

@@ -87,6 +87,7 @@ private:
     uint64_t            framesCopied_    {0};
     uint32_t            flipCleared_     {0};
     uint32_t            statTick_        {0};
+    uint32_t            probeTick_       {0};   // ticks since the last iGPU probe attempt
     uint64_t            statWork_        {0};   // absolute-time sums over the 720-tick log window
     uint64_t            statWorkMax_     {0};
     uint64_t            statBlit_        {0};
